@@ -1,7 +1,8 @@
 module.exports = (function(){
-
   var RTCSessionDescription = require('rtc-session-description');
   var SDP = require('sdp');
+  var em = new (require('events'));
+  em.setMaxListeners(Infinity);
 
   var RTCPeerConnection = function(configuration,constraints) {
     this.configuration = configuration;
@@ -19,15 +20,18 @@ module.exports = (function(){
     this.iceConnectionState = 'new';
     this.iceGatheringState = 'new';
 
-    this.onnegotiationneeded = null;
-    this.onicecandidate = null;
-    this.onsignalingstatechange = null;
-    this.onaddstream = null;
-    this.onremovestream = null;
-    this.oniceconnectionstatechange = null;
+    this.onnegotiationneeded = em.emit.bind(em, 'negotiationneeded');
+    this.onicecandidate = em.emit.bind(em, 'icecandidate');
+    this.onsignalingstatechange = em.emit.bind(em, 'signalingstatechange');
+    this.onaddstream = em.emit.bind(em, 'addstream');
+    this.onremovestream = em.emit.bind(em, 'removestream');
+    this.oniceconnectionstatechange = em.emit.bind(em, 'iceconnectionstatechange');
 
     this._localStreamSet = []; // set of streams being sent from this object
     this._remoteStreamSet = []; // set of streams being received by this object
+
+    this.removeEventListener = em.removeListener.bind(em);
+    this.addEventListener = em.addListener.bind(em);
   };
 
   RTCPeerConnection.prototype = {
@@ -62,34 +66,34 @@ module.exports = (function(){
       return session;
     },
 
-    createOffer: function(success,failure,constraints) {
+    createOffer: function() {
       // generate SDP: complete set (since this is an offer)
       var session = this.localSDPSession();
-      var sdp = new RTCSessionDescription({type:'offer',sdp:session.toSDP()});
-      success(sdp);
+      var sdp = new RTCSessionDescription({ type: 'offer', sdp: session.toSDP() });
+      return Promise.resolve(sdp);
     },
 
-    createAnswer: function(success,failure,constraints) {
+    createAnswer: function() {
       // generate SDP: restricted set (since this is an answer)
       var session = this.localSDPSession();
       // See http://datatracker.ietf.org/doc/draft-ietf-rtcweb-jsep/ for 'answer' vs 'pranswer'
-      var sdp = new RTCSessionDescription({type:'answer',sdp:session.toSDP()});
-      success(sdp);
+      var sdp = new RTCSessionDescription({ type: 'answer', sdp: session.toSDP() });
+      return Promise.resolve(sdp);
     },
 
-    setLocalSession: function(session,success,failure) {
+    setLocalSession: function(session) {
       // FIXME: Should negotiate SDP content.
       this._localSession = session;
-      success();
+      return Promise.resolve();
     },
 
-    setRemoteSession: function(session,success,failure) {
+    setRemoteSession: function(session) {
       // FIXME: Should negotiate SDP content.
       this._remoteSession = session;
-      success();
+      return Promise.resolve();
     },
 
-    setLocalDescription: function(description,success,failure) {
+    setLocalDescription: function(description) {
       var self = this;
       // If this RTCPeerConnection object's signaling state is closed, the user agent MUST throw an InvalidStateError exception and abort this operation.
       if(this.signalingState === 'closed') {
@@ -106,70 +110,71 @@ module.exports = (function(){
         }
       }
 
-      this.setLocalSession(
-        session,
-        function() {
-          // If connection's signaling state is closed, then abort these steps.
-          if(self.signalingState === 'closed') {
-            return
-          }
-          // Set connection's description attribute (localDescription or remoteDescription depending on the setting operation) to the RTCSessionDescription argument.
-          self.localDescription = description;
-          self._localSession = session;
+      return new Promise(function(resolve, reject) {
+        return self.setLocalSession(session)
+          .then(function() {
+            // If connection's signaling state is closed, then abort these steps.
+            if(self.signalingState === 'closed') {
+              return
+            }
+            // Set connection's description attribute (localDescription or remoteDescription depending on the setting operation) to the RTCSessionDescription argument.
+            self.localDescription = description;
+            self._localSession = session;
 
-          // If the local description was set, connection's ice gathering state is new, and the local description contains media, then set connection's ice gathering state to gathering.
-          // If the local description was set with content that caused an ICE restart, then set connection's ice gathering state to gathering.
-          if(self.iceGatheringState === 'new') {
-            self.iceGatheringState = 'gathering';
-          }
+            // If the local description was set, connection's ice gathering state is new, and the local description contains media, then set connection's ice gathering state to gathering.
+            // If the local description was set with content that caused an ICE restart, then set connection's ice gathering state to gathering.
+            if(self.iceGatheringState === 'new') {
+              self.iceGatheringState = 'gathering';
+            }
 
-          // Set connection's signalingState accordingly.
-          switch(self.signalingState + '.' + description.type) {
-            case 'stable.answer':
-              self.signalingState = 'have-local-offer';
-              break;
-            case 'have-local-offer.offer':
-              // same state
-              break;
-            case 'have-remote-offer.answer':
-              self.signalingState = 'stable';
-              break;
-            case 'have-remote-offer.pranswer':
-              self.signalingState = 'have-local-pranswer';
-              break;
-            case 'have-local-pranswer.pranswer':
-              // same state
-              break;
-            case 'have-local-pranswer.answer':
-              self.signalingState = 'stable';
-              break;
-            // other state transitions are invalid, actually
-          }
+            // Set connection's signalingState accordingly.
+            switch(self.signalingState + '.' + description.type) {
+              case 'stable.answer':
+                self.signalingState = 'have-local-offer';
+                break;
+              case 'have-local-offer.offer':
+                // same state
+                break;
+              case 'have-remote-offer.answer':
+                self.signalingState = 'stable';
+                break;
+              case 'have-remote-offer.pranswer':
+                self.signalingState = 'have-local-pranswer';
+                break;
+              case 'have-local-pranswer.pranswer':
+                // same state
+                break;
+              case 'have-local-pranswer.answer':
+                self.signalingState = 'stable';
+                break;
+              // other state transitions are invalid, actually
+            }
 
-          // Fire a simple event named signalingstatechange at connection.
-          if(self.onsignalingstatechange) {
-            self.onsignalingstatechange({}); // FIXME: Event
-          }
-          // Queue a new task that, if connection's signalingState is not closed, invokes the successCallback.
-          if(self.signalingState !== 'closed') {
-            success();
-          }
+            // Fire a simple event named signalingstatechange at connection.
+            if(self.onsignalingstatechange) {
+              self.onsignalingstatechange({}); // FIXME: Event
+            }
+            // Queue a new task that, if connection's signalingState is not closed, invokes the successCallback.
+            if(self.signalingState !== 'closed') {
+              resolve();
+            }
 
-          // EXTRA: Simulate ICE gathering process is done:
-          self.iceGatheringState = 'completed';
-          if(self.onicecandidate) {
-            self.onicecandidate({ candidate: null }); // FIXME candidate
+            // EXTRA: Simulate ICE gathering process is done:
+            self.iceGatheringState = 'completed';
+            if(self.onicecandidate) {
+              self.onicecandidate({ candidate: null }); // FIXME candidate
+            }
+          },
+          function() {
+            if(self.signalingState !== 'closed') {
+              reject({name:' IncompatibleSessionDescriptionError'});
+            }
           }
-        },
-        function() {
-          if(self.signalingState !== 'closed') {
-            failure({name:' IncompatibleSessionDescriptionError'});
-          }
-        }
-      );
+        );
+      });
     },
 
-    setRemoteDescription: function(description,success,failure) {
+    setRemoteDescription: function(description) {
       var self = this;
       // If this RTCPeerConnection object's signaling state is closed, the user agent MUST throw an InvalidStateError exception and abort this operation.
       if(this.signalingState === 'closed') {
@@ -185,63 +190,64 @@ module.exports = (function(){
         }
       }
 
-      this.setRemoteSession(
-        session,
-        function() {
-          // If connection's signaling state is closed, then abort these steps.
-          if(self.signalingState === 'closed') {
-            return
-          }
-          // Set connection's description attribute (localDescription or remoteDescription depending on the setting operation) to the RTCSessionDescription argument.
-          self.remoteDescription = description;
-          self._remoteSession = session;
+      return new Promise(function(resolve, reject) {
+        self.setRemoteSession(session)
+          .then(function() {
+            // If connection's signaling state is closed, then abort these steps.
+            if(self.signalingState === 'closed') {
+              return
+            }
+            // Set connection's description attribute (localDescription or remoteDescription depending on the setting operation) to the RTCSessionDescription argument.
+            self.remoteDescription = description;
+            self._remoteSession = session;
 
-          // Set connection's signalingState accordingly.
-          switch(self.signalingState + '.' + description.type) {
-            case 'stable.offer':
-              self.signalingState = 'have-remote-offer';
-              break;
-            case 'have-remote-offer.offer':
-              // same state
-              break;
-            case 'have-local-offer.answer':
-              self.signalingState = 'stable';
-              break;
-            case 'have-local-offer.pranswer':
-              self.signalingState = 'have-remote-pranswer';
-              break;
-            case 'have-remote-pranswer.pranswer':
-              // same state
-              break;
-            case 'have-remote-pranswer.answer':
-              self.signalingState = 'stable';
-              break;
-            // other state transitions are invalid, actually
-          }
+            // Set connection's signalingState accordingly.
+            switch(self.signalingState + '.' + description.type) {
+              case 'stable.offer':
+                self.signalingState = 'have-remote-offer';
+                break;
+              case 'have-remote-offer.offer':
+                // same state
+                break;
+              case 'have-local-offer.answer':
+                self.signalingState = 'stable';
+                break;
+              case 'have-local-offer.pranswer':
+                self.signalingState = 'have-remote-pranswer';
+                break;
+              case 'have-remote-pranswer.pranswer':
+                // same state
+                break;
+              case 'have-remote-pranswer.answer':
+                self.signalingState = 'stable';
+                break;
+              // other state transitions are invalid, actually
+            }
 
-          // Fire a simple event named signalingstatechange at connection.
-          if(self.onsignalingstatechange) {
-            self.onsignalingstatechange({}); // FIXME: Event
+            // Fire a simple event named signalingstatechange at connection.
+            if(self.onsignalingstatechange) {
+              self.onsignalingstatechange({}); // FIXME: Event
+            }
+            // Queue a new task that, if connection's signalingState is not closed, invokes the successCallback.
+            if(self.signalingState !== 'closed') {
+              resolve();
+            }
+          },
+          function() {
+            if(self.signalingState !== 'closed') {
+              reject({name:' IncompatibleSessionDescriptionError'});
+            }
           }
-          // Queue a new task that, if connection's signalingState is not closed, invokes the successCallback.
-          if(self.signalingState !== 'closed') {
-            success();
-          }
-        },
-        function() {
-          if(self.signalingState !== 'closed') {
-            failure({name:' IncompatibleSessionDescriptionError'});
-          }
-        }
-      );
+        );
+      });
     },
 
     updateIce: function(configuration,constraints) {
       // Do nothing, ICE not supported.
     },
 
-    addIceCandidate: function(candidate,success,failure) {
-      failure(new Error('addIceCandidate not implemented'));
+    addIceCandidate: function() {
+      return Promise.reject( 'addIceCandidate not implemented' );
     },
 
     getLocalStreams: function() {
